@@ -16,6 +16,10 @@
 
 package shapeless
 
+import language.experimental.macros
+ 
+import reflect.macros.Context
+
 import TypeOperators._
 
 /**
@@ -66,9 +70,9 @@ trait Poly extends PolyApply with PolyCases {
   /** The type of a case of this polymorphic function of the form `T => T` */
   type Hom[T] = Pullback1[T, T]
 
-  def compose[F <: Poly](f: F) = new Compose[this.type, F](this, f)
+  def compose(f: Poly) = new Compose[this.type, f.type](this, f)
   
-  def andThen[F <: Poly](f: F) = new Compose[F, this.type](f, this)
+  def andThen(f: Poly) = new Compose[f.type, this.type](f, this)
 
   trait CaseBuilder[T, L <: HList, R] {
     def apply(t: T): Pullback[L, R]
@@ -125,13 +129,165 @@ object Poly extends PolyInst with PolyAuxCases {
   type PullbackAux[-P, L <: HList, R] = CaseAux[P, L] { type Result = R }
   type HomAux[-P, T] = PullbackAux[P, T :: HNil, T]
   
-  implicit def inst0[P <: Poly, R](p : P)(implicit c : p.Case0[R]) : R = c()
+  implicit def inst0[R](p : Poly)(implicit c : p.Case0[R]) : R = c()
   
   type Case0Aux[-P] = CaseAux[P, HNil]
   type Pullback0Aux[-P, T] = PullbackAux[P, HNil, T]
   def Case0Aux[P, T](v : T) = new CaseAux[P, HNil] {
     type Result = T
     val value = (l : HNil) => v
+  }
+  
+  implicit def apply(f : Any) = macro liftFnImpl
+  
+  def liftFnImpl(c: Context)(f: c.Expr[Any]): c.Expr[Poly] = {
+    import c.universe._
+    import Flag._
+    
+    val pendingSuperCall = Apply(Select(Super(This(tpnme.EMPTY), tpnme.EMPTY), nme.CONSTRUCTOR), List())
+
+    val moduleName = TermName(c.freshName)
+
+    val typeOpsSym = c.mirror.staticModule("shapeless.TypeOperators")
+    val idSym = typeOpsSym.newTypeSymbol(TypeName("Id"))
+    val constSym = typeOpsSym.newTypeSymbol(TypeName("Const"))
+
+    val natTSym = c.mirror.staticClass("shapeless.$tilde$greater")
+    val natTTpe = natTSym.asClass.toTypeConstructor
+
+    def mkApply(fSym: Symbol, gSym: Symbol, body: Tree) = {
+      def mkTargRef(sym: Symbol) =
+        if(sym == idSym)
+          Ident(TypeName("T"))
+        else if(sym.asType.typeParams.isEmpty)
+          Ident(sym)
+        else
+          AppliedTypeTree(Ident(sym), List(Ident(TypeName("T"))))
+
+      DefDef(
+        Modifiers(), TermName("apply"),
+        List(TypeDef(Modifiers(PARAM), TypeName("T"), List(), TypeBoundsTree(EmptyTree, EmptyTree))),
+        List(List(ValDef(Modifiers(PARAM), TermName("t"), mkTargRef(fSym), EmptyTree))),
+        mkTargRef(gSym),
+        body
+      )
+    }
+
+    def destructureMethod(methodSym: MethodSymbol) = {
+      val paramSym = methodSym.paramss match {
+        case List(List(ps)) => ps
+        case _ => c.abort(c.enclosingPosition, "Expression $f has the wrong shape to be converted to a polymorphic function value")
+      }
+
+      def extractTc(tpe: Type): Symbol = {
+        val owner = tpe.typeSymbol.owner
+        if(owner == methodSym) idSym
+        else tpe.typeConstructor.typeSymbol
+      }
+
+      (extractTc(paramSym.typeSignature), extractTc(methodSym.returnType))
+    }
+
+    class TreeSubstituter(from: List[Symbol], to: List[Tree]) extends Transformer {
+      override def transform(tree: Tree): Tree = tree match {
+        case Ident(_) =>
+          def subst(from: List[Symbol], to: List[Tree]): Tree =
+            if (from.isEmpty) tree
+            else if (tree.symbol == from.head) to.head.duplicate // TODO: does it ever make sense *not* to perform a shallowDuplicate on `to.head`?
+            else subst(from.tail, to.tail);
+          subst(from, to)
+        case _ =>
+          val tree1 = super.transform(tree)
+          if (tree1 ne tree) tree1.setType(null)
+          tree1
+      }
+    }
+
+    val (fSym, gSym, dd) = 
+      f.tree match {
+        case Block(List(), Function(List(_), Apply(TypeApply(fun, _), _))) =>
+          val methodSym = fun.symbol.asMethod
+
+          val (fSym1, gSym1) = destructureMethod(methodSym)
+          val body = Apply(fun, List(Ident(TermName("t"))))
+
+          (fSym1, gSym1, mkApply(fSym1, gSym1, body))
+
+        case Block(List(), Function(List(_), Apply(fun, _))) =>
+          val methodSym = fun.symbol.asMethod
+
+          val (fSym1, gSym1) = destructureMethod(methodSym)
+          val body = Apply(fun, List(Ident(TermName("t"))))
+
+          (fSym1, gSym1, mkApply(fSym1, gSym1, body))
+
+        case Block(List(df @ DefDef(_, _, List(tp), List(List(vp)), tpt, rhs)), Literal(Constant(()))) =>
+          val methodSym = df.symbol.asMethod
+
+          val (fSym1, gSym1) = destructureMethod(methodSym)
+
+          val tpTree = Ident(TypeName("T"))
+          val vpTree = Ident(TermName("t"))
+          val substRhs = new TreeSubstituter(List(tp.symbol, vp.symbol), List(tpTree, vpTree)) transform rhs
+          val body = mkApply(fSym1, gSym1, substRhs)
+
+          (fSym1, gSym1, body)
+
+        case Block(List(df @ DefDef(_, _, List(), List(List(vp)), tpt, rhs)), Literal(Constant(()))) =>
+          val methodSym = df.symbol.asMethod
+
+          val (fSym1, gSym1) = destructureMethod(methodSym)
+
+          val vpTree = Ident(TermName("t"))
+          val substRhs = new TreeSubstituter(List(vp.symbol), List(vpTree)) transform rhs
+          val body = mkApply(fSym1, gSym1, substRhs)
+
+          (fSym1, gSym1, body)
+
+        case _ =>
+          c.abort(c.enclosingPosition, s"Unable to convert expression $f to a polymorphic function value")
+      }
+
+    def mkTargTree(sym: Symbol) =
+      if(sym == idSym)
+        Select(Select(Ident(TermName("shapeless")), TermName("TypeOperators")), TypeName("Id"))
+      else if(sym.asType.typeParams.isEmpty)
+        SelectFromTypeTree(
+          AppliedTypeTree(
+            Select(Select(Ident(TermName("shapeless")), TermName("TypeOperators")), TypeName("Const")),
+            List(Ident(sym))
+          ),
+          TypeName("λ")
+        )
+      else
+        Ident(sym)
+
+    val liftedTypeTree =
+      AppliedTypeTree(
+        Ident(natTSym),
+        List(mkTargTree(fSym), mkTargTree(gSym))
+      )
+
+    val module =
+      ModuleDef(Modifiers(), moduleName,
+        Template(
+          List(liftedTypeTree),
+          emptyValDef,
+          List(
+            DefDef(
+              Modifiers(), nme.CONSTRUCTOR, List(),
+              List(List()),
+              TypeTree(),
+              Block(List(pendingSuperCall), Literal(Constant(())))),
+
+            dd
+          )
+        )
+      )
+
+    val moduleRefTree = c.introduceTopLevel("shapeless", module)
+
+    c.Expr[Poly](moduleRefTree)
   }
 }
 
@@ -189,6 +345,7 @@ object ~> {
   implicit def inst4[T](f : Id ~> Id) : T => T = f[T](_)  // Explicit type argument needed here to prevent recursion?
   implicit def inst5[F[_], G, T](f : F ~> Const[G]#λ) : F[T] => G = f(_)
   implicit def inst6[G, T](f : Id ~> Const[G]#λ) : T => G = f(_)
+  implicit def inst7[F, G](f : Const[F]#λ ~> Const[G]#λ) : F => G = f(_)
 }
 
 trait ~>>[F[_], R] extends Poly1 {

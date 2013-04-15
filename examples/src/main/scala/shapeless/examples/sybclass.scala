@@ -41,10 +41,6 @@ object SybClassExamples {
   type Name = String
   type Address = String
 
-  object raise extends Poly1 {
-    implicit def caseInt = at[Int](_*110/100)
-  }
-
   def paradise : Unit = {
     val beforeRaise =
       Company(
@@ -64,7 +60,7 @@ object SybClassExamples {
       )
   
     // Compute a new company structure with all salaries increased by 10%
-    val afterRaise = everywhere(raise)(beforeRaise)
+    val afterRaise = everywhere(Poly { def apply(i: Int) = i*110/100 })(beforeRaise)
     println(afterRaise)
 
     val expected =
@@ -91,10 +87,6 @@ object SybClassExamples {
   case class Leaf[T](t: T) extends Tree[T]
   case class Node[T](left: Tree[T], right: Tree[T]) extends Tree[T]
   
-  object inc extends Poly1 {
-    implicit def caseInt = at[Int](_+1)
-  }
-  
   def recursion : Unit = {
     val tree: Tree[Int] =
       Node(
@@ -114,7 +106,7 @@ object SybClassExamples {
         )
       )
 
-    val result = everywhere(inc)(tree)
+    val result = everywhere(Poly { def apply(i: Int) = i+1 })(tree)
     println(result)
     
     val expected: Tree[Int] =
