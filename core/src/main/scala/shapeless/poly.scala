@@ -35,7 +35,6 @@ abstract class CaseAux[-P, L <: HList] { outer =>
   def apply()(implicit ev: HNil =:= L) = value(HNil)
   def apply[T](t: T)(implicit ev: (T :: HNil) =:= L) = value(t :: HNil)
   def apply[T, U](t: T, u: U)(implicit ev: (T :: U :: HNil) =:= L) = value(t :: u :: HNil)
-  def apply[P <: Product](p : P)(implicit hl: HListerAux[P, L]) = value(hl(p))
 }
 
 object CaseAux extends CaseInst {
@@ -45,6 +44,14 @@ object CaseAux extends CaseInst {
     type Result = R
     val value = v
   }
+}
+
+object Case {
+  def apply[P, L <: HList](implicit c: CaseAux[P, L]) : CaseAux[P, L] { type Result = c.Result } = c
+}
+
+object Case1 {
+  def apply[P, T](implicit c: CaseAux[P, T :: HNil]) : CaseAux[P, T :: HNil] { type Result = c.Result } = c
 }
 
 /**
